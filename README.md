@@ -1,5 +1,7 @@
 # dsh-modpack · DSH 整合包
 
+> 仓库：<https://github.com/M1r0er/dsh-modpack> · MIT · DSH 插件（bundle）
+
 像 Minecraft 的 PCL / HMCL 整合包那样管理 DSH 的第三方插件：
 
 - **导出**：勾选本机已安装的第三方插件 → 生成一个只有清单和版本的小体积 `.dshpack.zip`（**不含插件代码、不含 `node_modules`**），同时给出一整串可直接复制执行的安装命令。

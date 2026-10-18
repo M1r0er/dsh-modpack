@@ -17,6 +17,18 @@
   ],
   "license": "MIT",
   "author": "M1r0er",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/M1r0er/dsh-modpack.git"
+  },
+  "homepage": "https://github.com/M1r0er/dsh-modpack#readme",
+  "bugs": {
+    "url": "https://github.com/M1r0er/dsh-modpack/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
