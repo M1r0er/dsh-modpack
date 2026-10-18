@@ -126,6 +126,11 @@ node tests/host.test.mjs   # 用 mock Cordis 服务跑导出→预览→apply �
 - `index.js`：Host 半，接 `pluginManager` / `configEditor`，注册工具与 `/modpack/*` 路由。
 - `client.js`：设置页，注册到 `settings.section`。
 
+## 验证状态
+
+- **2026-10-19 真机**（DSH 0.2.1-rc.2 / Windows）：重启后设置页已注册（`settings.section`，`id=modpack`，order 45，active）；`modpack_list` 读到 15 个第三方插件；`modpack_export` 生成 5.0 KiB 整合包 / 13 条安装命令（2 个本地链接自动跳过）；`modpack_inspect` 预览结果为 13 已装同版本 + 2 本地链接跳过。
+- **离线**：18 项测试通过（zip 往返/CRC、命令解析、密钥剔除、mock Cordis 全链路、client 模块注册），详见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+
 ## License
 
 MIT
