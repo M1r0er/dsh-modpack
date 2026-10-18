@@ -1,6 +1,9 @@
 # dsh-modpack · DSH 整合包
 
-> 仓库：<https://github.com/M1r0er/dsh-modpack> · MIT · DSH 插件（bundle）
+[![npm version](https://img.shields.io/npm/v/dsh-modpack.svg?color=cb3837&logo=npm)](https://www.npmjs.com/package/dsh-modpack)
+[![license](https://img.shields.io/npm/l/dsh-modpack.svg)](LICENSE)
+
+> npm：<https://www.npmjs.com/package/dsh-modpack> · 仓库：<https://github.com/M1r0er/dsh-modpack> · MIT · DSH 插件（bundle）
 
 像 Minecraft 的 PCL / HMCL 整合包那样管理 DSH 的第三方插件：
 
