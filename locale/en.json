@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Modpack",
+    "description": "Share installed third-party plugins the way PCL modpacks work: tick what to include, export a tiny .dshpack.zip that records only the manifest and versions plus one install command per plugin; on import, preview every entry and its status before applying."
+  }
+}

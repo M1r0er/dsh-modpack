@@ -1,0 +1,54 @@
+{
+  "name": "dsh-modpack",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "PCL 式 DSH 整合包：勾选已安装的第三方插件，导出小体积 .dshpack.zip 与一键安装命令串；导入先预览再按 spec 重新下载安装。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "modpack",
+    "integrated-pack",
+    "plugin-manager",
+    "export",
+    "import",
+    "backup"
+  ],
+  "license": "MIT",
+  "author": "M1r0er",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "API.md",
+    "docs",
+    "tests"
+  ],
+  "scripts": {
+    "check": "node --check index.js && node --check client.js",
+    "test": "node tests/zip.test.mjs && node tests/pack.test.mjs && node tests/host.test.mjs && node tests/client-smoke.test.mjs"
+  },
+  "dsh": {
+    "id": "dsh-modpack",
+    "name": "整合包",
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

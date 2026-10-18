@@ -1,0 +1,7 @@
+# dsh-modpack bundle patch —— 这个组合包只插入一行 Host 插件；
+# 设置页由同包的 dsh.client（client.js）注册到 settings.section。
+# 行写在组合包自己的 patch 里，插件管理页才能寻址、实时开关。
+- insert:
+    - id: dsh-modpack
+      name: 'dsh-modpack'
+      config: {}

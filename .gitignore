@@ -1,0 +1,16 @@
+node_modules/
+.tmp/
+dist/
+coverage/
+
+# 本插件自己产生的整合包 / 还原点
+*.dshpack.zip
+*.dshpack
+backups/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
