@@ -38,6 +38,14 @@ window.__ModuleLoader__.load({
       noPlugins: '当前 profile 里没有第三方插件。',
       localTag: '本机链接，不可分享',
       localPublishedTag: '本机链接 · npm 已发布',
+      embedAvailable: '可内置',
+      embedTag: '内置',
+      embedSelectedTag: '内置（随包）',
+      embedHint: '有 {n}/{total} 个本地插件可“内置打包”：把插件代码（npm pack tarball）写进 zip，接收方无需 npm 也能安装。仅对信任的人分享。',
+      embedRowHint: '勾选 = 把该插件的代码打进整合包（仅分享给信任的人）',
+      embedPlan: '内置插件 {n} 个（随包安装）',
+      embedConfirm: '其中含 {n} 个内置插件：会直接安装整合包内的第三方代码（已校验 sha256）。',
+      selectionCount: '{selected}/{installable} 可安装 · {embedded}/{embeddable} 内置',
       notShareable: '不可分享',
       disabledTag: '未启用',
       kindGit: 'git',
@@ -134,6 +142,14 @@ window.__ModuleLoader__.load({
       noPlugins: 'This profile has no third-party plugins.',
       localTag: 'local link, cannot be shared',
       localPublishedTag: 'local link · published to npm',
+      embedAvailable: 'can embed',
+      embedTag: 'embedded',
+      embedSelectedTag: 'embedded (in zip)',
+      embedHint: '{n}/{total} local plugins can be “embedded”: their code (npm pack tarball) is written into the zip so importers do not need npm. Share only with people you trust.',
+      embedRowHint: 'Checked = embed this plugin’s code in the pack (trusted sharing only)',
+      embedPlan: '{n} embedded plugin(s) (installed from the zip)',
+      embedConfirm: 'This pack contains {n} embedded plugin(s): their code will be installed from the archive (sha256 verified).',
+      selectionCount: '{selected}/{installable} installable · {embedded}/{embeddable} embedded',
       notShareable: 'cannot be shared',
       disabledTag: 'disabled',
       kindGit: 'git',
@@ -370,6 +386,11 @@ window.__ModuleLoader__.load({
       return true;
     }
 
+    /** 本地链接且未发布 npm：不能按 registry 分享，但可以“内置打包”代码。 */
+    function isEmbeddable(plugin) {
+      return Boolean(plugin && plugin.local === true && !isInstallable(plugin));
+    }
+
     function formatBytes(value) {
       const n = Number(value);
       if (!isFinite(n) || n < 0) return '';
@@ -505,6 +526,7 @@ window.__ModuleLoader__.load({
         const [refreshing, setRefreshing] = React.useState(false);
 
         const [selected, setSelected] = React.useState(null);
+        const [embedded, setEmbedded] = React.useState(null);
         const [form, setForm] = React.useState({
           name: '',
           version: '1.0.0',
@@ -609,7 +631,14 @@ window.__ModuleLoader__.load({
           () => plugins.filter((plugin) => isInstallable(plugin)).map((plugin) => plugin.name),
           [plugins],
         );
+        const embeddableNames = React.useMemo(
+          () => plugins.filter((plugin) => plugin.local === true && !isInstallable(plugin)).map((plugin) => plugin.name),
+          [plugins],
+        );
+        const embeddableSet = React.useMemo(() => new Set(embeddableNames), [embeddableNames]);
+        const embeddedSet = React.useMemo(() => new Set(embedded || []), [embedded]);
         const selectedNames = installableNames.filter((name) => selectedSet.has(name));
+        const embeddedNames = embeddableNames.filter((name) => embeddedSet.has(name));
         const exportResultPath = exportResult && exportResult.path ? String(exportResult.path) : '';
         const commandText = exportResult && exportResult.commandText ? String(exportResult.commandText) : '';
         const exportCommands =
@@ -625,6 +654,15 @@ window.__ModuleLoader__.load({
         }, [snapshot, plugins]);
 
         const togglePlugin = (name, on) => {
+          if (embeddableSet.has(name)) {
+            setEmbedded((prev) => {
+              const next = new Set(prev || []);
+              if (on) next.add(name);
+              else next.delete(name);
+              return embeddableNames.filter((candidate) => next.has(candidate));
+            });
+            return;
+          }
           setSelected((prev) => {
             const next = new Set(prev || []);
             if (on) next.add(name);
@@ -635,7 +673,7 @@ window.__ModuleLoader__.load({
 
         const doExport = () => {
           if (exporting || !snapshot) return;
-          if (!selectedNames.length) {
+          if (!selectedNames.length && !embeddedNames.length) {
             setExportResult(null);
             setExportError(t('selectOne'));
             return;
@@ -648,10 +686,11 @@ window.__ModuleLoader__.load({
             version: form.version.trim(),
             author: form.author.trim(),
             description: form.description.trim(),
-            include: selectedNames,
+            include: [...selectedNames, ...embeddedNames],
             includeConfig: form.includeConfig === true,
             redactSecrets: true,
           };
+          if (embeddedNames.length) body.embed = embeddedNames;
           if (snapshot.profile) body.profile = snapshot.profile;
           postJson('/export', body)
             .then((data) => setExportResult(data))
@@ -732,6 +771,7 @@ window.__ModuleLoader__.load({
           if (planSource.kind === 'pack') body.pack = planSource.pack;
           else body.text = planSource.text;
           if (withConfig && plan.configCount) body.withConfig = true;
+          if (Number(plan.embeddedCount) > 0) body.allowEmbedded = true;
           postJson('/import', body)
             .then((data) => {
               setApplyResult(data);
@@ -773,13 +813,16 @@ window.__ModuleLoader__.load({
         const pluginRow = (plugin) => {
           const name = String(plugin.name);
           const shareable = isInstallable(plugin);
-          const checked = shareable && selectedSet.has(name);
+          const embeddable = embeddableSet.has(name);
+          const selectable = shareable || embeddable;
+          const checked = embeddable ? embeddedSet.has(name) : shareable && selectedSet.has(name);
           const kindTag =
             plugin.kind && plugin.kind !== 'registry' && plugin.kind !== 'local'
               ? t(plugin.kind === 'git' ? 'kindGit' : plugin.kind === 'tarball' ? 'kindTarball' : 'kindUnknown')
               : '';
           const version = plugin.version ? String(plugin.version) : '';
           const description = plugin.description ? String(plugin.description) : name;
+          const title = embeddable ? `${description}\n${t('embedRowHint')}` : description;
           const tags = [];
           if (version) tags.push(tag('v', version, T.brand));
           if (kindTag) tags.push(tag('k', kindTag));
@@ -788,24 +831,25 @@ window.__ModuleLoader__.load({
               ? tag('l', t('localPublishedTag'), T.brand)
               : tag('l', t('localTag'), T.warn));
           } else if (plugin.installable === false) tags.push(tag('n', t('notShareable'), T.warn));
+          if (embeddable) tags.push(checked ? tag('emb', t('embedSelectedTag'), T.brand) : tag('emb', t('embedAvailable'), T.warn));
           if (plugin.enabled === false) tags.push(tag('d', t('disabledTag')));
 
           return h(
             'label',
             {
               key: name,
-              title: description,
+              title,
               style: {
                 display: 'flex',
                 alignItems: 'center',
                 gap: 12,
                 padding: '7px 10px',
                 borderRadius: 8,
-                cursor: shareable ? 'pointer' : 'default',
-                opacity: shareable ? 1 : 0.55,
+                cursor: selectable ? 'pointer' : 'default',
+                opacity: selectable ? 1 : 0.55,
               },
               onMouseEnter: (event) => {
-                if (shareable) event.currentTarget.style.background = T.hover;
+                if (selectable) event.currentTarget.style.background = T.hover;
               },
               onMouseLeave: (event) => {
                 event.currentTarget.style.background = 'transparent';
@@ -842,7 +886,7 @@ window.__ModuleLoader__.load({
                 key: 'c',
                 type: 'checkbox',
                 checked: checked,
-                disabled: !shareable || exporting,
+                disabled: !selectable || exporting,
                 'aria-label': name,
                 onChange: (event) => togglePlugin(name, event.target.checked === true),
                 style: {
@@ -851,7 +895,7 @@ window.__ModuleLoader__.load({
                   height: 15,
                   margin: 0,
                   flex: '0 0 auto',
-                  cursor: shareable ? 'pointer' : 'default',
+                  cursor: selectable ? 'pointer' : 'default',
                 },
               }),
             ],
@@ -973,7 +1017,12 @@ window.__ModuleLoader__.load({
           h('div', { key: 'lead', style: S.lead }, t('exportLead')),
           h('div', { key: 'plugins-head', style: { display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 } }, [
             h('span', { key: 'l', style: { fontSize: 12, color: T.muted } }, t('pluginsLabel')),
-            h('span', { key: 'c', style: S.hint }, `${selectedNames.length}/${installableNames.length}`),
+            h('span', { key: 'c', style: S.hint }, t('selectionCount', {
+              selected: selectedNames.length,
+              installable: installableNames.length,
+              embedded: embeddedNames.length,
+              embeddable: embeddableNames.length,
+            })),
             h('span', { key: 'sp', style: { marginLeft: 'auto' } }),
             h(
               'button',
@@ -981,8 +1030,11 @@ window.__ModuleLoader__.load({
                 key: 'all',
                 type: 'button',
                 style: S.ghost,
-                disabled: exporting || selectedNames.length === installableNames.length,
-                onClick: () => setSelected(installableNames.slice()),
+                disabled: exporting || (selectedNames.length === installableNames.length && embeddedNames.length === embeddableNames.length),
+                onClick: () => {
+                  setSelected(installableNames.slice());
+                  setEmbedded(embeddableNames.slice());
+                },
               },
               t('selectAll'),
             ),
@@ -993,13 +1045,21 @@ window.__ModuleLoader__.load({
                 type: 'button',
                 style: S.ghost,
                 disabled: exporting,
-                onClick: () =>
-                  setSelected(installableNames.filter((name) => !selectedSet.has(name))),
+                onClick: () => {
+                  setSelected(installableNames.filter((name) => !selectedSet.has(name)));
+                  setEmbedded(embeddableNames.filter((name) => !embeddedSet.has(name)));
+                },
               },
               t('invert'),
             ),
           ]),
           h('div', { key: 'list', style: { display: 'flex', flexDirection: 'column' } }, pluginList),
+          embeddableNames.length
+            ? h('div', { key: 'embed-hint', style: Object.assign({}, S.hint, { color: T.warn }) }, t('embedHint', {
+                n: embeddedNames.length,
+                total: embeddableNames.length,
+              }))
+            : null,
           h('div', { key: 'fields', style: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 } }, [
             field(
               'name',
@@ -1061,16 +1121,16 @@ window.__ModuleLoader__.load({
               {
                 key: 'go',
                 type: 'button',
-                disabled: exporting || !selectedNames.length,
+                disabled: exporting || (!selectedNames.length && !embeddedNames.length),
                 onClick: doExport,
                 style: Object.assign({}, S.primary, {
-                  opacity: exporting || !selectedNames.length ? 0.5 : 1,
-                  cursor: exporting || !selectedNames.length ? 'default' : 'pointer',
+                  opacity: exporting || (!selectedNames.length && !embeddedNames.length) ? 0.5 : 1,
+                  cursor: exporting || (!selectedNames.length && !embeddedNames.length) ? 'default' : 'pointer',
                 }),
               },
               exporting ? t('exporting') : t('exportAction'),
             ),
-            installableNames.length && !selectedNames.length
+            installableNames.length && !selectedNames.length && !embeddedNames.length
               ? h('span', { key: 'h', style: S.hint }, t('selectOne'))
               : null,
             exportError
@@ -1102,6 +1162,7 @@ window.__ModuleLoader__.load({
             })
           : '';
         const planConfigCount = plan ? Number(plan.configCount) || 0 : 0;
+        const planEmbeddedCount = plan ? Number(plan.embeddedCount) || 0 : 0;
         const planWarnings = plan && Array.isArray(plan.warnings) ? plan.warnings.filter(Boolean) : [];
 
         const planBlock = plan
@@ -1111,6 +1172,7 @@ window.__ModuleLoader__.load({
                 tag('src', plan.source === 'archive' ? t('sourceArchive') : t('sourceCommands')),
                 plan.source === 'archive' && fileName ? tag('file', fileName) : null,
                 planConfigCount ? tag('cfg', t('configCount', { n: planConfigCount }), T.warn) : null,
+                planEmbeddedCount ? tag('emb', t('embedPlan', { n: planEmbeddedCount }), T.warn) : null,
                 h('span', { key: 'sp', style: { marginLeft: 'auto' } }),
                 h('button', { key: 'clear', type: 'button', style: S.ghost, disabled: planning || applying, onClick: clearPlan }, t('clear')),
               ]),
@@ -1158,6 +1220,7 @@ window.__ModuleLoader__.load({
                             entry && entry.spec ? String(entry.spec) : '—',
                           ),
                           statusChip('st', entry && entry.status),
+                          entry && entry.embedded ? tag('emb', t('embedTag'), T.brand) : null,
                         ],
                       ),
                     )
@@ -1215,7 +1278,7 @@ window.__ModuleLoader__.load({
                       h(
                         'span',
                         { key: 'h', style: { flex: '1 1 240px', minWidth: 0, fontSize: 11, color: T.warn, lineHeight: '17px' } },
-                        t('applyConfirmHint', { n: planCommands.length }),
+                        t('applyConfirmHint', { n: planCommands.length }) + (planEmbeddedCount ? ' ' + t('embedConfirm', { n: planEmbeddedCount }) : ''),
                       ),
                       h(
                         'button',
@@ -1462,6 +1525,7 @@ window.__ModuleLoader__.load({
       inject: ['slots'],
       // 暴露给测试：勾选可行性的唯一判定，避免测试去猜渲染树。
       isShareable: isInstallable,
+      isEmbeddable,
       apply(ctx) {
         const dict = { zh, en };
         const boxes = { locale: { current: undefined } };

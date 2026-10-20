@@ -111,6 +111,10 @@ test('client.js：模块可加载、apply 注册 settings.section、Panel 首帧
   assert.equal(mod.isShareable({ name: 'local-x', installable: false, local: true }), false);
   assert.equal(mod.isShareable({ name: 'not-installable', installable: false }), false);
   assert.equal(mod.isShareable({ name: '', installable: true }), false);
+  assert.equal(typeof mod.isEmbeddable, 'function');
+  assert.equal(mod.isEmbeddable({ name: 'local-x', local: true, installable: false }), true);
+  assert.equal(mod.isEmbeddable({ name: 'dsh-workspace-gate', local: true, installable: true, published: true }), false);
+  assert.equal(mod.isEmbeddable({ name: 'dsh-ops', local: false, installable: true }), false);
 
   let registered = null;
   const ctx = {

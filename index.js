@@ -15,10 +15,12 @@
  * 人类界面在 client.js（设置 → 整合包）。
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { execFile } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 import { createZip, readZip } from './lib/zip.mjs';
 import {
@@ -26,11 +28,14 @@ import {
   classifySource,
   commandsFor,
   diffPlan,
+  embeddedTarballName,
   FORMAT,
   parseCommandText,
   renderInstallScript,
   renderReadme,
   sanitizeConfig,
+  slugify,
+  SUSPICIOUS_PACKED_FILE,
   upgradeLocalPlugins,
   validateManifest,
   zipFileName,
@@ -43,6 +48,10 @@ const ROUTE = '/modpack';
 const PKG_NAME = 'dsh-modpack';
 const MAX_BODY = 24 * 1024 * 1024;
 const MANIFEST_FILE = 'dshpack.json';
+/** 单个内置插件 tarball 上限；整体上限见 MAX_EMBEDDED_TOTAL_BYTES。 */
+const MAX_EMBEDDED_PLUGIN_BYTES = 16 * 1024 * 1024;
+const MAX_EMBEDDED_TOTAL_BYTES = 48 * 1024 * 1024;
+const execFileAsync = promisify(execFile);
 
 function selfDir() {
   try {
@@ -199,6 +208,153 @@ const REGISTRY_ORIGIN = 'https://registry.npmjs.org/';
 const REGISTRY_CACHE_TTL = 10 * 60 * 1000;
 /** name@version → { value, at }；避免每次刷新都打网络。 */
 const registryCache = new Map();
+
+function sha256Hex(buffer) {
+  return createHash('sha256').update(buffer).digest('hex');
+}
+
+/** `link:` / `file:` / 绝对路径 / 相对路径 → 本机路径；其它来源返回 null。 */
+function localSourcePath(source) {
+  let raw = String(source ?? '').trim();
+  if (!raw) return null;
+  if (/^link:/i.test(raw)) raw = raw.slice(5);
+  else if (/^file:/i.test(raw)) raw = raw.slice(5);
+  else if (!/^(\.{0,2}[\\/]|[A-Za-z]:[\\/])/.test(raw)) return null;
+  raw = raw.replace(/^(['"])(.*)\1$/, '$2').trim();
+  if (!raw) return null;
+  return isAbsolute(raw) ? raw : resolve(process.cwd(), raw);
+}
+
+/**
+ * pnpm 调用方式：优先 DSH 注入的 packageManager（桌面端带内置 pnpm），
+ * 其次用本安装自带的 pnpm + Electron 的 Node 模式。
+ */
+function resolvePnpmInvocation(ctx) {
+  try {
+    const invocation = getService(ctx, 'profileContext')?.packageManager;
+    if (invocation && typeof invocation.command === 'string' && invocation.command) {
+      return {
+        command: invocation.command,
+        args: Array.isArray(invocation.args) ? [...invocation.args] : [],
+        env: { ...process.env, ...(invocation.env ?? {}) },
+      };
+    }
+  } catch {
+    /* 下一个候选 */
+  }
+  try {
+    const resources = process.resourcesPath;
+    if (resources) {
+      const cli = join(resources, 'runtime', 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.cjs');
+      if (existsSync(cli)) {
+        return { command: process.execPath, args: [cli], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } };
+      }
+    }
+  } catch {
+    /* 非桌面端 */
+  }
+  return null;
+}
+
+/** 解析 `pnpm pack --json` 的输出（对象或单元素数组）。 */
+function parsePackOutput(stdout, directory) {
+  const text = String(stdout ?? '');
+  const start = text.search(/[[{]/);
+  if (start < 0) throw new Error('pnpm pack 没有返回 JSON');
+  let value;
+  try {
+    value = JSON.parse(text.slice(start));
+  } catch {
+    throw new Error('pnpm pack 返回的 JSON 无法解析');
+  }
+  const info = Array.isArray(value) ? value[0] : value;
+  if (!info || typeof info !== 'object') throw new Error('pnpm pack 返回结构不符合预期');
+  const files = Array.isArray(info.files)
+    ? info.files.map((file) => (typeof file === 'string' ? file : String(file?.path ?? file?.name ?? '')))
+    : [];
+  let file = info.filename ?? info.tarball ?? info.path ?? info.name;
+  if (typeof file === 'string' && file && !isAbsolute(file)) file = join(directory, file);
+  return { file: typeof file === 'string' ? file : null, files };
+}
+
+/** 把插件目录 `pnpm pack` 成 tarball；返回 bytes + 包内文件清单。 */
+async function packPluginDirectory(ctx, directory) {
+  const invocation = resolvePnpmInvocation(ctx);
+  if (!invocation) throw new Error('无法调用 pnpm pack：没有可用的 packageManager（请用桌面端或在 PATH 中安装 pnpm）');
+  const temp = mkdtempSync(join(tmpdir(), 'dsh-modpack-pack-'));
+  try {
+    const args = [...invocation.args, 'pack', '--json', '--pack-destination', temp];
+    const { stdout } = await execFileAsync(invocation.command, args, {
+      cwd: directory,
+      env: invocation.env,
+      timeout: 180_000,
+      maxBuffer: 16 * 1024 * 1024,
+      windowsHide: true,
+    });
+    const parsed = parsePackOutput(stdout, temp);
+    let file = parsed.file;
+    if (!file || !existsSync(file)) {
+      const listing = readdirSync(temp).filter((entry) => entry.endsWith('.tgz'));
+      if (!listing.length) throw new Error('pnpm pack 没有生成 tarball');
+      file = join(temp, listing[0]);
+    }
+    const info = statSync(file);
+    if (info.size > MAX_EMBEDDED_PLUGIN_BYTES) {
+      throw new Error(`插件 tarball 超过上限 ${formatBytes(MAX_EMBEDDED_PLUGIN_BYTES)}（${formatBytes(info.size)}）`);
+    }
+    return { bytes: readFileSync(file), files: parsed.files };
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+/**
+ * 把一个本地插件变成可随包携带的内置条目。
+ * 目录 → pnpm pack；`file:*.tgz` → 直接复用 tarball。
+ */
+async function embedLocalPlugin(ctx, plugin) {
+  const sourcePath = localSourcePath(plugin?.source ?? plugin?.spec);
+  if (!sourcePath) throw new Error(`插件 ${plugin?.name ?? '?'} 没有可打包的本地路径`);
+  let stats;
+  try {
+    stats = statSync(sourcePath);
+  } catch {
+    throw new Error(`插件 ${plugin?.name ?? '?'} 的本地路径不存在：${sourcePath}`);
+  }
+
+  let bytes;
+  let files = [];
+  let sourceKind;
+  if (stats.isDirectory()) {
+    const packed = await packPluginDirectory(ctx, sourcePath);
+    bytes = packed.bytes;
+    files = packed.files;
+    sourceKind = 'npm-pack';
+  } else if (stats.isFile()) {
+    bytes = readFileSync(sourcePath);
+    sourceKind = 'file-tarball';
+  } else {
+    throw new Error(`插件 ${plugin?.name ?? '?'} 的本地路径不是目录或文件：${sourcePath}`);
+  }
+
+  const suspicious = files.filter((file) => SUSPICIOUS_PACKED_FILE.test(file));
+  if (suspicious.length) {
+    throw new Error(`拒绝内置 ${plugin.name}：tarball 含疑似凭据文件（${suspicious.slice(0, 5).join('、')}${suspicious.length > 5 ? ' …' : ''}）`);
+  }
+  if (bytes.length > MAX_EMBEDDED_PLUGIN_BYTES) {
+    throw new Error(`插件 ${plugin.name} 的 tarball 超过上限 ${formatBytes(MAX_EMBEDDED_PLUGIN_BYTES)}`);
+  }
+
+  return {
+    bytes,
+    embedded: {
+      tarball: embeddedTarballName(plugin.name, plugin.version),
+      sha256: sha256Hex(bytes),
+      size: bytes.length,
+      source: sourceKind,
+    },
+  };
+}
 
 /** npm registry 的包文档 URL（scoped 包用 @scope%2fname 形式）。 */
 function registryDocumentUrl(name) {
@@ -393,7 +549,47 @@ async function runExport(ctx, body, exec) {
   const profile = body?.profile ? String(body.profile) : snapshot.profile;
   const warnings = [];
 
-  const local = selected.filter((plugin) => plugin.local && !plugin.installable);
+  const embedNames = new Set(Array.isArray(body?.embed) ? body.embed.map(String) : []);
+  if (body?.embedLocal === true) {
+    for (const plugin of selected) if (plugin.local && !plugin.installable) embedNames.add(plugin.name);
+  }
+  if (embedNames.size && body?.writeArchive === false) {
+    throw new Error('内置插件需要写入压缩包，不能同时使用 writeArchive:false');
+  }
+
+  const manifestPlugins = [];
+  const embeddedBlobs = [];
+  let embeddedBytesTotal = 0;
+  for (const plugin of selected) {
+    if (!embedNames.has(plugin.name)) {
+      manifestPlugins.push(plugin);
+      continue;
+    }
+    if (plugin.installable && !plugin.local) {
+      warnings.push(`${plugin.name} 已可从 npm / git 安装，已忽略“内置”请求。`);
+      manifestPlugins.push(plugin);
+      continue;
+    }
+    const packed = await embedLocalPlugin(ctx, plugin);
+    embeddedBytesTotal += packed.bytes.length;
+    if (embeddedBytesTotal > MAX_EMBEDDED_TOTAL_BYTES) {
+      throw new Error(`内置插件总大小超过上限 ${formatBytes(MAX_EMBEDDED_TOTAL_BYTES)}`);
+    }
+    manifestPlugins.push({
+      ...plugin,
+      embedded: packed.embedded,
+      local: false,
+      kind: 'embedded',
+      installable: true,
+      spec: `${plugin.name}@${plugin.version ?? '0.0.0'}`,
+    });
+    embeddedBlobs.push({ name: packed.embedded.tarball, bytes: packed.bytes });
+  }
+  if (embeddedBlobs.length) {
+    warnings.push(`已内置 ${embeddedBlobs.length} 个插件（${formatBytes(embeddedBytesTotal)}）：接收方导入即执行其代码，请只分享可信内容。`);
+  }
+
+  const local = manifestPlugins.filter((plugin) => plugin.local && !plugin.installable && !plugin.embedded);
   if (local.length) {
     warnings.push(`${local.length} 个插件是本机链接/本地路径且未在 npm 找到对应版本（${local.map((p) => p.name).join('、')}），已标记为不可安装，导入时会跳过。`);
   }
@@ -415,7 +611,7 @@ async function runExport(ctx, body, exec) {
     description: body?.description,
     profile,
     dshVersion: snapshot.dshVersion,
-    plugins: selected,
+    plugins: manifestPlugins,
     config,
     secretsRedacted: body?.includeConfig === true && body?.redactSecrets !== false,
     warnings,
@@ -436,6 +632,7 @@ async function runExport(ctx, body, exec) {
       { name: 'install.ps1', data: renderInstallScript(manifest, 'ps1') },
       { name: 'install.sh', data: renderInstallScript(manifest, 'sh') },
       { name: 'README.md', data: renderReadme(manifest) },
+      ...embeddedBlobs.map((blob) => ({ name: blob.name, data: blob.bytes })),
     ]);
     writeFileSync(file, buffer);
     bytes = buffer.length;
@@ -451,6 +648,7 @@ async function runExport(ctx, body, exec) {
     commandText,
     manifest,
     warnings,
+    embeddedCount: manifest.stats?.embedded ?? 0,
   };
 }
 
@@ -464,7 +662,7 @@ function parsePackBuffer(buffer) {
   } catch {
     throw new Error(`${MANIFEST_FILE} 不是有效 JSON`);
   }
-  return validateManifest(parsed);
+  return { manifest: validateManifest(parsed), files };
 }
 
 async function runPlan(ctx, body) {
@@ -473,11 +671,13 @@ async function runPlan(ctx, body) {
   const profile = body?.profile ? String(body.profile) : snapshot.profile;
 
   if (body?.buffer || body?.pack) {
-    const manifest = parsePackBuffer(body?.buffer ?? decodePackBuffer(body?.pack));
+    const { manifest } = parsePackBuffer(body?.buffer ?? decodePackBuffer(body?.pack));
     const targets = (manifest.plugins ?? []).map((plugin) => ({ ...plugin, profile }));
     const plan = diffPlan(targets, installed, profile);
     const warnings = [...(Array.isArray(manifest.warnings) ? manifest.warnings : [])];
     if (plan.statuses.local) warnings.push(`包内 ${plan.statuses.local} 个插件是本地链接，无法自动安装，已跳过。`);
+    const embeddedCount = targets.filter((plugin) => plugin.embedded).length;
+    if (embeddedCount) warnings.push(`包内 ${embeddedCount} 个内置插件会随包安装（代码来自整合包，导入即执行，请确认来源可信）。`);
     return {
       ok: true,
       source: 'archive',
@@ -488,6 +688,7 @@ async function runPlan(ctx, body) {
       commands: plan.entries,
       statuses: plan.statuses,
       configCount: Array.isArray(manifest.config) ? manifest.config.length : 0,
+      embeddedCount,
       warnings,
     };
   }
@@ -556,7 +757,60 @@ async function runImport(ctx, body) {
   const results = [];
   let restartRequired = false;
 
+  // 内置插件：校验 sha256 后落到稳定缓存目录，再交给 pluginManager 安装 tarball。
+  const embeddedEntries = plan.commands.filter(
+    (entry) => entry.embedded && (entry.status === 'missing' || entry.status === 'installed-different'),
+  );
+  if (embeddedEntries.length) {
+    if (body?.allowEmbedded !== true) {
+      throw new Error('整合包包含内置插件：内置插件会把第三方代码装进 profile，需显式 allowEmbedded=true 才会安装');
+    }
+    const files = body?.buffer
+      ? readZip(body.buffer)
+      : body?.pack
+        ? readZip(decodePackBuffer(body.pack))
+        : null;
+    if (!files) throw new Error('缺少压缩包内容，无法读取内置插件 tarball');
+    const cacheDir = join(defaultOutDir(), 'embedded');
+    mkdirSync(cacheDir, { recursive: true });
+    for (const entry of embeddedEntries) {
+      const meta = entry.embedded;
+      try {
+        const bytes = files.get(String(meta.tarball));
+        if (!bytes) throw new Error(`压缩包缺少内置 tarball：${meta.tarball}`);
+        if (Number(meta.size) > 0 && bytes.length !== Number(meta.size)) {
+          throw new Error(`内置 tarball 大小不符：期望 ${meta.size}，实际 ${bytes.length}`);
+        }
+        const digest = sha256Hex(bytes);
+        if (digest !== String(meta.sha256).toLowerCase()) throw new Error('内置 tarball sha256 校验失败');
+        const fileName = `${slugify(entry.name)}-${slugify(entry.version ?? '0.0.0')}-${digest.slice(0, 8)}.tgz`;
+        const target = join(cacheDir, fileName);
+        if (!existsSync(target)) writeFileSync(target, bytes);
+        const outcome = await manager.installBundle(target, { enabled: true, saveExact: true });
+        const application = outcome?.application;
+        if (application === 'restart-required') restartRequired = true;
+        results.push({
+          spec: entry.spec,
+          action: 'embedded',
+          ok: application !== 'failed',
+          application: application ?? null,
+          version: outcome?.version ?? null,
+          tarball: target,
+          error: outcome?.error ? String(outcome.error.diagnostic ?? outcome.error.code ?? JSON.stringify(outcome.error)) : undefined,
+        });
+      } catch (error) {
+        results.push({ spec: entry.spec, action: 'embedded', ok: false, error: String(error?.message ?? error) });
+      }
+    }
+  }
+
   for (const entry of plan.commands) {
+    if (entry.embedded) {
+      if (entry.status === 'installed-same') {
+        results.push({ spec: entry.spec, action: 'skipped', ok: true, reason: '内置插件已安装同版本' });
+      }
+      continue;
+    }
     if (entry.status !== 'missing' && entry.status !== 'installed-different') {
       results.push({ spec: entry.spec, action: 'skipped', ok: true, reason: entry.status === 'local' ? '本地链接，跳过' : '已安装同版本' });
       continue;
@@ -651,16 +905,27 @@ async function runImport(ctx, body) {
 }
 
 function exportText(result) {
+  const embeddedCount = Number(result.embeddedCount) || 0;
   const lines = [];
   if (result.path) {
     lines.push(`整合包已导出：${result.path}`);
-    lines.push(`大小：${formatBytes(result.bytes)}（不含插件代码 / node_modules）`);
+    lines.push(
+      embeddedCount
+        ? `大小：${formatBytes(result.bytes)}（含 ${embeddedCount} 个内置插件 tarball，不含 node_modules）`
+        : `大小：${formatBytes(result.bytes)}（不含插件代码 / node_modules）`,
+    );
     if (result.sha256) lines.push(`SHA-256：${result.sha256}`);
   } else {
     lines.push('已生成安装命令（未写压缩包）。');
   }
-  lines.push('', `插件 ${result.manifest.stats.plugins} 个，其中可安装 ${result.manifest.stats.installable} 个。`, '', '安装命令：', '');
-  lines.push(result.commandText || '# （没有可安装的插件）');
+  lines.push(
+    '',
+    `插件 ${result.manifest.stats.plugins} 个，其中可从 registry 安装 ${result.manifest.stats.installable - embeddedCount} 个${embeddedCount ? `，内置 ${embeddedCount} 个` : ''}。`,
+    '',
+    '安装命令：',
+    '',
+  );
+  lines.push(result.commandText || '# （没有需要从 registry 安装的插件）');
   if (result.warnings.length) {
     lines.push('', '注意：', ...result.warnings.map((warning) => `- ${warning}`));
   }
@@ -674,17 +939,19 @@ function planText(plan) {
     missing: '待安装',
     local: '本地链接（跳过）',
     unknown: '无法识别',
-  };  const lines = [];
+  };
+  const lines = [];
   lines.push(`来源：${plan.source === 'archive' ? '整合包压缩包' : '粘贴的命令串'}`);
   if (plan.name) lines.push(`整合包：${plan.name} ${plan.version ?? ''}`);
   lines.push(`目标 profile：${plan.profile ?? '（默认）'}`);
   lines.push(
     `统计：同版本 ${plan.statuses.same} / 版本不同 ${plan.statuses.different} / 待安装 ${plan.statuses.missing} / 本地 ${plan.statuses.local}${plan.statuses.unknown ? ` / 无法识别 ${plan.statuses.unknown}` : ''}`,
   );
+  if (plan.embeddedCount) lines.push(`内置插件：${plan.embeddedCount} 个（随包安装，须显式 allowEmbedded）`);
   if (plan.configCount) lines.push(`包内配置 override：${plan.configCount} 条（应用需显式 withConfig）`);
   lines.push('');
   for (const entry of plan.commands) {
-    lines.push(`[${statusLabel[entry.status] ?? entry.status}] ${entry.spec}`);
+    lines.push(`[${statusLabel[entry.status] ?? entry.status}] ${entry.spec}${entry.embedded ? '（内置）' : ''}`);
   }
   if (plan.warnings.length) lines.push('', '注意：', ...plan.warnings.map((warning) => `- ${warning}`));
   return lines.join('\n');
@@ -767,7 +1034,7 @@ export function apply(ctx) {
     ctx.tools.register({
       name: 'modpack_export',
       description:
-        '把选中的已安装第三方插件导出为 PCL 式整合包：生成小体积 .dshpack.zip（只含清单、版本、安装命令，可选配置；不含插件代码），同时返回可直接复制执行的 `dsh plugin --profile <p> add <spec>` 命令串。不会安装任何东西。',
+        '把选中的已安装第三方插件导出为 PCL 式整合包：默认生成小体积 .dshpack.zip（只含清单、版本、安装命令，可选配置；不含插件代码），同时返回可复制执行的安装命令串。对未发布 npm 的本地插件可显式 embed，把其 npm pack tarball 打进 zip（导入时随包安装，代码会随包分发，注意信任）。不会安装任何东西。',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -781,8 +1048,17 @@ export function apply(ctx) {
             items: { type: 'string' },
             description: '要包含的 bundle 包名列表；省略或空数组 = 全部已安装第三方插件。可先用 modpack_list 查看。',
           },
+          embed: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '要“内置打包”的本地插件名列表：仅对 link:/file: 且未发布 npm 的插件生效，会执行 npm pack 把 tarball 写入 zip。写入压缩包时可用。',
+          },
+          embedLocal: {
+            type: 'boolean',
+            description: 'true = 自动内置全部“本地链接且未发布 npm”的选中插件（等价于把这些名字放进 embed）。',
+          },
           output: { type: 'string', description: '输出路径：目录（默认 ~/.dsh/modpacks）或 .zip/.dshpack 文件路径；相对路径按当前会话工作目录解析。' },
-          writeArchive: { type: 'boolean', description: 'false = 只生成命令串、不写压缩包；默认 true。' },
+          writeArchive: { type: 'boolean', description: 'false = 只生成命令串、不写压缩包；默认 true。有内置插件时必须写压缩包。' },
           includeConfig: { type: 'boolean', description: '是否把选中插件的 config override 一并写入包（默认 false）。' },
           redactSecrets: { type: 'boolean', description: 'includeConfig 时是否剔除疑似密钥，默认 true。' },
           profile: { type: 'string', description: '命令里的 --profile 值；默认探测当前 profile。' },
@@ -842,7 +1118,7 @@ export function apply(ctx) {
     ctx.tools.register({
       name: 'modpack_import',
       description:
-        '导入 .dshpack.zip 整合包或安装命令串：默认只做计划预览（apply=false）；apply=true 时先写 JSON 还原点，再通过 DSH 的 pluginManager.installBundle 按 spec 安装缺失/版本不同的插件（不执行 shell 命令）。',
+        '导入 .dshpack.zip 整合包或安装命令串：默认只做计划预览（apply=false）；apply=true 时先写 JSON 还原点，再通过 DSH 的 pluginManager.installBundle 安装缺失/版本不同的插件（registry 按 spec，内置插件从包内 tarball）。不执行 shell 命令。含内置插件的包必须显式 allowEmbedded=true。',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -850,6 +1126,7 @@ export function apply(ctx) {
           path: { type: 'string', description: '.dshpack.zip / .zip 文件路径；与 text 二选一。' },
           text: { type: 'string', description: '安装命令串（每行一条 dsh plugin … add <spec>）。' },
           apply: { type: 'boolean', description: '默认 false 只预览；true 才会真正安装。' },
+          allowEmbedded: { type: 'boolean', description: '包内含内置插件（随包代码）时必须为 true 才安装。' },
           withConfig: { type: 'boolean', description: '是否应用包内 config override（默认 false）。' },
           profile: { type: 'string', description: '可选：命令里的 --profile 值。' },
         },
@@ -861,7 +1138,7 @@ export function apply(ctx) {
       deferLoading: false,
       async execute(args, exec) {
         try {
-          const body = { apply: args?.apply === true, withConfig: args?.withConfig === true };
+          const body = { apply: args?.apply === true, withConfig: args?.withConfig === true, allowEmbedded: args?.allowEmbedded === true };
           if (typeof args?.text === 'string' && args.text.trim()) body.text = args.text;
           else body.buffer = readFileSync(resolveInputPath(ctx, exec, args?.path));
           if (args?.profile) body.profile = args.profile;

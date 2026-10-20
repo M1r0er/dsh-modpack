@@ -1,14 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { apply } from '../index.js';
 import { readZip } from '../lib/zip.mjs';
+import { createZip } from '../lib/zip.mjs';
 
 /** 最小 Cordis 上下文替身：只实现 dsh-modpack 用到的服务与注册 API。 */
-function makeContext({ bundles, plugins, configs = [], installs = [], enabledCalls = [], edits = [] }) {
+function makeContext({ bundles, plugins, configs = [], installs = [], enabledCalls = [], edits = [], packageManager = undefined }) {
   const tools = new Map();
   const routes = [];
   const manager = {
@@ -54,6 +55,7 @@ function makeContext({ bundles, plugins, configs = [], installs = [], enabledCal
       if (name === 'pluginManager') return manager;
       if (name === 'configEditor') return editor;
       if (name === 'webServer') return webServer;
+      if (name === 'profileContext') return packageManager ? { packageManager } : undefined;
       return undefined;
     },
     effect(fn) {
@@ -316,6 +318,129 @@ test('Host：本地链接但已在 npm 发布的插件可被导出，未发布�
     assert.equal(plan.statuses.local, 1, '只有未发布的本地包算 local 跳过');
   } finally {
     globalThis.fetch = previousFetch;
+    if (previous === undefined) delete process.env.DSH_MODPACK_DIR;
+    else process.env.DSH_MODPACK_DIR = previous;
+    if (previousRegistry === undefined) delete process.env.DSH_MODPACK_REGISTRY_CHECK;
+    else process.env.DSH_MODPACK_REGISTRY_CHECK = previousRegistry;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Host：内置打包未发布本地插件，导入校验 sha 后按 tarball 安装', async () => {
+  const dir = workspace();
+  const previous = process.env.DSH_MODPACK_DIR;
+  const previousRegistry = process.env.DSH_MODPACK_REGISTRY_CHECK;
+  process.env.DSH_MODPACK_DIR = dir;
+  process.env.DSH_MODPACK_REGISTRY_CHECK = 'off';
+  const installs = [];
+  try {
+    // 一个“本地开发、未发布 npm”的插件目录
+    const pluginDir = join(dir, 'local-embed');
+    mkdirSync(pluginDir, { recursive: true });
+    writeFileSync(join(pluginDir, 'package.json'), JSON.stringify({ name: 'local-embed', version: '1.0.0', type: 'module' }));
+    writeFileSync(join(pluginDir, 'index.js'), 'export const name = "local-embed"\n');
+    // 以 Node 脚本冒充 pnpm pack：写一个假 tarball 并按 --json 输出
+    const packer = join(dir, 'fake-packer.cjs');
+    writeFileSync(
+      packer,
+      [
+        "const fs = require('node:fs');",
+        "const path = require('node:path');",
+        'const args = process.argv.slice(2);',
+        "const i = args.indexOf('--pack-destination');",
+        'const out = i >= 0 ? args[i + 1] : process.cwd();',
+        "const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8'));",
+        "const base = pkg.name.replace(/^@/, '').replace(/[\\/]/g, '-');",
+        'const filename = path.join(out, `${base}-${pkg.version}.tgz`);',
+        'fs.writeFileSync(filename, Buffer.from(`FAKE-TARBALL:${pkg.name}@${pkg.version}`));',
+        "console.log(JSON.stringify({ name: pkg.name, version: pkg.version, filename, files: [{ path: 'package.json' }, { path: 'index.js' }] }));",
+        '',
+      ].join('\n'),
+    );
+
+    const { ctx, tools } = makeContext({
+      bundles: [
+        bundle('local-embed', '1.0.0', { source: `link:${pluginDir}` }),
+        bundle('dsh-ops', '0.3.0'),
+      ],
+      plugins: [liveRow('local-embed'), liveRow('dsh-ops')],
+      installs,
+      packageManager: { command: process.execPath, args: [packer], env: {} },
+    });
+    apply(ctx);
+
+    const exported = await tools.get('modpack_export').execute(
+      { name: '内置测试', version: '1.0.0', include: ['local-embed', 'dsh-ops'], embed: ['local-embed'] },
+      {},
+    );
+    assert.equal(exported.ok, true, JSON.stringify(exported));
+    assert.equal(exported.embeddedCount, 1);
+    assert.doesNotMatch(exported.commandText, /local-embed/);
+    assert.match(exported.commandText, /dsh-ops@0\.3\.0/);
+
+    const files = readZip(readFileSync(exported.path));
+    const manifest = JSON.parse(files.get('dshpack.json').toString('utf8'));
+    const embeddedPlugin = manifest.plugins.find((plugin) => plugin.name === 'local-embed');
+    assert.equal(manifest.formatVersion, 2);
+    assert.equal(manifest.stats.embedded, 1);
+    assert.equal(embeddedPlugin.kind, 'embedded');
+    assert.equal(embeddedPlugin.installable, true);
+    assert.match(embeddedPlugin.embedded.sha256, /^[a-f0-9]{64}$/);
+    const tarball = files.get(embeddedPlugin.embedded.tarball);
+    assert.ok(tarball, 'zip 内含内置 tarball');
+    assert.equal(tarball.length, embeddedPlugin.embedded.size);
+    assert.equal(tarball.toString('utf8'), 'FAKE-TARBALL:local-embed@1.0.0');
+    assert.match(files.get('README.md').toString('utf8'), /内置插件/);
+
+    // 模拟“另一台机器”：目标 profile 没有 local-embed
+    const targetInstalls = [];
+    const target = makeContext({
+      bundles: [bundle('dsh-ops', '0.3.0')],
+      plugins: [liveRow('dsh-ops')],
+      installs: targetInstalls,
+      packageManager: { command: process.execPath, args: [packer], env: {} },
+    });
+    apply(target.ctx);
+
+    const preview = await target.tools.get('modpack_inspect').execute({ path: exported.path }, {});
+    assert.equal(preview.embeddedCount, 1);
+    assert.equal(preview.commands.find((entry) => entry.name === 'local-embed').status, 'missing');
+
+    // 不显式允许内置 → 拒绝应用
+    const denied = await target.tools.get('modpack_import').execute({ path: exported.path, apply: true }, {});
+    assert.equal(denied.ok, false);
+    assert.match(String(denied.error), /allowEmbedded/);
+
+    const applied = await target.tools.get('modpack_import').execute(
+      { path: exported.path, apply: true, allowEmbedded: true },
+      {},
+    );
+    assert.equal(applied.ok, true, JSON.stringify(applied));
+    const embeddedResult = applied.results.find((item) => item.action === 'embedded');
+    assert.ok(embeddedResult && embeddedResult.ok, JSON.stringify(applied.results));
+    assert.match(embeddedResult.tarball, /\.tgz$/);
+    assert.ok(existsSync(embeddedResult.tarball), '内置 tarball 落到稳定缓存目录');
+    assert.equal(targetInstalls.length, 1);
+    assert.equal(targetInstalls[0].spec, embeddedResult.tarball);
+
+    // 篡改 sha → 拒绝安装
+    const tamperedManifest = JSON.parse(JSON.stringify(manifest));
+    tamperedManifest.plugins.find((plugin) => plugin.name === 'local-embed').embedded.sha256 = '0'.repeat(64);
+    const tampered = createZip([
+      { name: 'dshpack.json', data: JSON.stringify(tamperedManifest) },
+      { name: embeddedPlugin.embedded.tarball, data: tarball },
+    ]);
+    const tamperedPath = join(dir, 'tampered.dshpack.zip');
+    writeFileSync(tamperedPath, tampered);
+    const tamperedResult = await target.tools.get('modpack_import').execute(
+      { path: tamperedPath, apply: true, allowEmbedded: true },
+      {},
+    );
+    assert.equal(tamperedResult.ok, true);
+    const tamperedEntry = tamperedResult.results.find((item) => item.action === 'embedded');
+    assert.equal(tamperedEntry.ok, false);
+    assert.match(String(tamperedEntry.error), /sha256/);
+  } finally {
     if (previous === undefined) delete process.env.DSH_MODPACK_DIR;
     else process.env.DSH_MODPACK_DIR = previous;
     if (previousRegistry === undefined) delete process.env.DSH_MODPACK_REGISTRY_CHECK;

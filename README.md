@@ -55,15 +55,16 @@ dsh plugin add dsh-modpack
 
 1. **导出**
    - 列出当前 profile 的第三方 bundle（含版本、是否本地链接）；
-   - 本地链接（`link:` / 本地路径）会按 `name@version` 查询 npm registry：已发布的自动升级为可分享项（标注「本机链接 · npm 已发布」），未发布的仍置灰标注「不可分享」；
+   - 本地链接（`link:` / 本地路径）会按 `name@version` 查询 npm registry：已发布的自动升级为可分享项（标注「本机链接 · npm 已发布」），未发布的仍标注「不可分享」；
+   - 未发布的本地插件可勾选**「内置」**：对该插件执行 `npm pack`，把插件代码以 tarball 写进整合包（见下文）；
    - 默认全选可安装项；
    - 可填名称 / 版本 / 作者 / 描述；
    - 可选"包含配置"：只收**选中插件**的 config override，疑似密钥默认替换为 `${REDACTED}`；
    - 导出后显示 zip 路径与命令块，可一键复制。
 2. **导入**
    - 拖入 `.dshpack.zip`，或粘贴命令串；
-   - 预览表逐条列出 `spec` 与状态 `installed-same / installed-different / missing / local / unknown`；
-   - 点"应用安装"需二次确认；执行完显示每一步结果、还原点路径；需要重启的改动会单独提示。
+   - 预览表逐条列出 `spec` 与状态 `installed-same / installed-different / missing / local / unknown`，内置条目带「内置」标记；
+   - 点"应用安装"需二次确认；含内置插件时会额外提示"将执行包内第三方代码"；执行完显示每一步结果、还原点路径；需要重启的改动会单独提示。
 
 ## 命令行 / Agent 工具
 
@@ -77,33 +78,49 @@ dsh plugin add dsh-modpack
 // 导出为 zip（默认写到 ~/.dsh/modpacks）
 { "tool": "modpack_export", "name": "我的整合包", "version": "1.0.0" }
 
+// 把未发布 npm 的本地插件“内置”进包（对每个插件执行 npm pack）
+{ "tool": "modpack_export", "include": ["dsh-local-x", "dsh-ops"], "embed": ["dsh-local-x"] }
+
 // 导入预览（默认 apply=false，绝不安装）
 { "tool": "modpack_import", "path": "D:/packs/我的整合包-1.0.0.dshpack.zip" }
 
-// 确认后应用
-{ "tool": "modpack_import", "path": "…", "apply": true }
+// 确认后应用；包里含内置插件时必须显式 allowEmbedded
+{ "tool": "modpack_import", "path": "…", "apply": true, "allowEmbedded": true }
 ```
 
 `modpack_import` 的安装动作走 `pluginManager.installBundle(spec, { saveExact: true })`，**不执行 shell，也不执行粘贴文本里的任何命令**——命令串只被解析成 spec。
 
-## 整合包格式
+## 内置插件（随包代码，可选）
+
+有些插件只在本机开发、不打算发布 npm，仍想分享给朋友。此时可在导出面板勾选该插件的**「内置」**：
+
+1. 对插件的本机目录执行 `pnpm pack`（尊重 `package.json` 的 `files` / `.npmignore`，排除 `node_modules`）；
+2. 扫描包内文件名，含 `.env`、`config.toml`、`credentials.*`、私钥等疑似凭据时**拒绝内置**；
+3. 把 tarball 写入 zip 的 `embedded/<name>-<version>.tgz`，并在 `dshpack.json` 记录 `sha256` 与 `size`；
+4. 导入时校验 sha256/size 后落到 `~/.dsh/modpacks/embedded/`，再交给 `pluginManager.installBundle(tarball)` 安装（走 DSH 自己的 pnpm 通道）。
+
+> ⚠️ 内置 = 把第三方代码装进 profile。只分享/导入你信任的来源；导入应用前会再次确认，且必须显式 `allowEmbedded: true`（界面已在确认框里代填）。
+>
+> 内置插件若还有未发布的 npm 依赖，导入时 pnpm 会解析失败；v1 只保证“依赖都能从 registry 解析”的插件可内置。
 
 `.dshpack.zip` 是一个普通 zip，内含：
 
 | 文件 | 作用 |
 | --- | --- |
-| `dshpack.json` | 清单：format/version、插件列表（name、version、spec、kind、bundle 行）、安装命令、可选 config |
-| `install.ps1` / `install.sh` | 与清单一致的安装命令脚本 |
+| `dshpack.json` | 清单：format/version、插件列表（name、version、spec、kind、bundle 行）、安装命令、可选 config、内置 tarball 的 sha256/size |
+| `embedded/*.tgz` | 仅在选择“内置”时出现：随包携带的插件 tarball |
+| `install.ps1` / `install.sh` | 与清单一致的安装命令脚本（内置插件不产生命令） |
 | `README.md` | 人类可读的说明 |
 
-`dshpack.json` 关键字段见 [API.md](API.md)；`format` 固定为 `dsh-modpack`，`formatVersion` 为 1。导入时会校验格式版本，未来格式升级会给出明确提示。
+`dshpack.json` 关键字段见 [API.md](API.md)；`format` 固定为 `dsh-modpack`，当前 `formatVersion` 为 **2**（1 为无内置的旧格式，仍可导入）。导入时会校验格式版本，未来格式升级会给出明确提示。
 
 ## 安全
 
-- 导出**从不安装**任何东西；列表会为本地链接插件向 npm registry 做一次只读版本查询（2s 超时，失败按未发布处理），可用 `DSH_MODPACK_REGISTRY_CHECK=off` 关闭。
+- 导出默认**从不安装**任何东西；列表会为本地链接插件向 npm registry 做一次只读版本查询（2s 超时，失败按未发布处理），可用 `DSH_MODPACK_REGISTRY_CHECK=off` 关闭。
 - 导入默认只预览；`apply:true` 前会写 `<outDir>/backups/before-import-<时间>.json`。
-- 包内不写插件代码；`config` 默认不导出，导出时会剔除密钥键与 `sk-` / `ghp_` / `xoxb-` 等明文 token。
-- 本地链接插件（`link:` / 本地路径）只有**同名同版本已发布到 npm** 时才按 `name@version` 导出；否则标记不可分享、导入时跳过，不会把别人的本地路径当成可下载 spec。
+- 默认包内不写插件代码；只有显式“内置”才会写入 tarball，并记录 sha256/size，导入时校验后才安装。
+- `config` 默认不导出，导出时会剔除密钥键与 `sk-` / `ghp_` / `xoxb-` 等明文 token。
+- 本地链接插件（`link:` / 本地路径）只有**同名同版本已发布到 npm** 时才按 `name@version` 导出；否则可显式内置或标记不可分享，不会把别人的本地路径当成可下载 spec。
 - 本插件的 HTTP 路由与 GUI 同源（`/modpack/*`），没有额外的跨域入口。
 
 ## 已知限制
@@ -113,6 +130,8 @@ dsh plugin add dsh-modpack
 - 版本对比是字符串精确比较；`name@latest` 这类浮动 spec 只能判断"已安装/未安装"。
 - 不支持 zip64 / 加密 zip；整合包超过 32 MiB 会被拒绝（正常只有几 KB）。
 - 配置导入（`withConfig` / 界面勾选）目前按 `patchId` 匹配本机行；行 id 被上游插件改名时会跳过并给出 reason。
+- 内置插件版本随包冻结、不会自动更新；升级需重新导出/导入。内置依赖若未发布到 registry，pnpm 安装会失败。
+- 内置 tarball 上限：单个 16 MiB、整体 48 MiB；超过会拒绝导出。
 
 ## 开发
 
@@ -130,9 +149,10 @@ node tests/host.test.mjs   # 用 mock Cordis 服务跑导出→预览→apply �
 
 ## 验证状态
 
+- **2026-10-20 v0.2.0 内置插件**：真实 `pnpm pack` 冒烟通过——把 `dsh-workspace-gate` 目录打成 41.9 KiB tarball 写入 zip，清单为 `formatVersion: 2`、记录 sha256/size；导入端 mock 验证了 sha256 不符会拒绝、未带 `allowEmbedded` 会拒绝、内置 tarball 落到稳定目录后调用 `installBundle(tarball)`。
 - **2026-10-20 v0.1.2 修复**：Host 已把「本地链接但 npm 同版本已发布」的插件升级为可分享项，但 Client 的勾选判定仍残留 `local === true → 不可选`，导致这类插件显示「本机链接 · npm 已发布」却无法勾选。现已改为以 `installable` / `published` 为准，并补了回归测试（`dsh-workspace-gate`、`dsh-inkvault` 这类插件可直接勾选导出）。
 - **2026-10-19 真机**（DSH 0.2.1-rc.2 / Windows）：重启后设置页已注册（`settings.section`，`id=modpack`，order 45，active）；`modpack_list` 读到 15 个第三方插件；`modpack_export` 生成 5.0 KiB 整合包 / 13 条安装命令（2 个本地链接自动跳过）；`modpack_inspect` 预览结果为 13 已装同版本 + 2 本地链接跳过。
-- **离线**：20 项测试通过（zip 往返/CRC、命令解析、密钥剔除、本地链接升级、mock Cordis 全链路、client 勾选判定），详见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+- **离线**：22 项测试通过（zip 往返/CRC、命令解析、密钥剔除、本地链接升级、内置清单校验、mock Cordis 全链路、client 勾选判定），详见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
 
 ## License
 

@@ -205,3 +205,53 @@ test('commandsFor 过滤本地插件并按名称排序', () => {
   );
   assert.deepEqual(lines, ['dsh plugin --profile web add a@2', 'dsh plugin --profile web add z@1']);
 });
+
+test('内置插件清单：formatVersion 2、命令排除、内嵌校验、diff 传递', () => {
+  const manifest = buildManifest({
+    name: 'Embedded',
+    version: '1.0.0',
+    plugins: [
+      { name: 'dsh-ops', version: '0.3.0', source: 'dsh-ops@0.3.0' },
+      {
+        name: 'local-x',
+        version: '1.0.0',
+        source: 'link:D:/x',
+        embedded: {
+          tarball: 'embedded/local-x-1.0.0.tgz',
+          sha256: 'a'.repeat(64),
+          size: 123,
+          source: 'npm-pack',
+        },
+      },
+    ],
+  });
+  assert.equal(manifest.formatVersion, 2);
+  assert.equal(manifest.stats.embedded, 1);
+  assert.equal(manifest.stats.installable, 2);
+  assert.deepEqual(manifest.commands, ['dsh plugin add dsh-ops@0.3.0']);
+  assert.equal(manifest.plugins.find((plugin) => plugin.name === 'local-x').kind, 'embedded');
+  assert.match(renderReadme(manifest), /内置插件/);
+  assert.equal(validateManifest(manifest).plugins[1].embedded.sha256, 'a'.repeat(64));
+
+  const badPath = JSON.parse(JSON.stringify(manifest));
+  badPath.plugins[1].embedded.tarball = '../evil.tgz';
+  assert.throws(() => validateManifest(badPath), /路径非法/);
+
+  const badSha = JSON.parse(JSON.stringify(manifest));
+  badSha.plugins[1].embedded.sha256 = 'not-a-sha';
+  assert.throws(() => validateManifest(badSha), /sha256/);
+
+  const badSize = JSON.parse(JSON.stringify(manifest));
+  badSize.plugins[1].embedded.size = 0;
+  assert.throws(() => validateManifest(badSize), /size/);
+
+  const v1 = JSON.parse(JSON.stringify(manifest));
+  v1.formatVersion = 1;
+  assert.throws(() => validateManifest(v1), /embedded/);
+
+  const plan = diffPlan(manifest.plugins, [], 'desktop');
+  assert.equal(plan.statuses.missing, 2);
+  const embeddedEntry = plan.entries.find((entry) => entry.name === 'local-x');
+  assert.equal(embeddedEntry.status, 'missing');
+  assert.equal(embeddedEntry.embedded.tarball, 'embedded/local-x-1.0.0.tgz');
+});
