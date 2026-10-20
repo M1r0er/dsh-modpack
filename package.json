@@ -1,6 +1,6 @@
 {
   "name": "dsh-modpack",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "PCL 式 DSH 整合包：勾选已安装的第三方插件，导出小体积 .dshpack.zip 与一键安装命令串；未发布 npm 的本地插件可内置打包；导入先预览再安装。",
   "keywords": [

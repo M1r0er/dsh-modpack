@@ -131,7 +131,7 @@ dsh plugin add dsh-modpack
 - 不支持 zip64 / 加密 zip；整合包超过 32 MiB 会被拒绝（正常只有几 KB）。
 - 配置导入（`withConfig` / 界面勾选）目前按 `patchId` 匹配本机行；行 id 被上游插件改名时会跳过并给出 reason。
 - 内置插件版本随包冻结、不会自动更新；升级需重新导出/导入。内置依赖若未发布到 registry，pnpm 安装会失败。
-- 内置 tarball 上限：单个 16 MiB、整体 48 MiB；超过会拒绝导出。
+- 内置 tarball 上限：单个 12 MiB、整体 24 MiB；超过会拒绝导出。
 
 ## 开发
 

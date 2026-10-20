@@ -46,11 +46,11 @@ export const inject = ['tools'];
 
 const ROUTE = '/modpack';
 const PKG_NAME = 'dsh-modpack';
-const MAX_BODY = 24 * 1024 * 1024;
+const MAX_BODY = 48 * 1024 * 1024;
 const MANIFEST_FILE = 'dshpack.json';
 /** 单个内置插件 tarball 上限；整体上限见 MAX_EMBEDDED_TOTAL_BYTES。 */
-const MAX_EMBEDDED_PLUGIN_BYTES = 16 * 1024 * 1024;
-const MAX_EMBEDDED_TOTAL_BYTES = 48 * 1024 * 1024;
+const MAX_EMBEDDED_PLUGIN_BYTES = 12 * 1024 * 1024;
+const MAX_EMBEDDED_TOTAL_BYTES = 24 * 1024 * 1024;
 const execFileAsync = promisify(execFile);
 
 function selfDir() {
