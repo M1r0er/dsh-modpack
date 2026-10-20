@@ -20,8 +20,9 @@ Host 半在同一个 origin 下注册 prefix 路由 `/modpack/*`，Client 半（
       "spec": "dsh-better-sidebar@0.28.0", // 可用于 `dsh plugin add` 的 spec
       "source": "dsh-better-sidebar@0.28.0",
       "kind": "registry",            // registry | git | tarball | local | unknown
-      "installable": true,           // false = link:/本地目录，别人机器装不了
+      "installable": true,           // false = link:/本地目录且 npm 上查不到同名同版本
       "local": false,
+      "published": true,             // 仅本地链接且已发布到 npm 时出现：导出按 name@version
       "official": false,
       "optional": false,
       "description": "Better Sidebar for DSH …",

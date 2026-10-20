@@ -31,6 +31,7 @@ import {
   renderInstallScript,
   renderReadme,
   sanitizeConfig,
+  upgradeLocalPlugins,
   validateManifest,
   zipFileName,
 } from './lib/pack.mjs';
@@ -194,8 +195,49 @@ function decodePackBase64(value) {
   return buffer;
 }
 
-/** 把 pluginManager 的 bundle 列表 + 行状态整合成前端/工具能用的快照。 */
-async function profileState(ctx) {
+const REGISTRY_ORIGIN = 'https://registry.npmjs.org/';
+const REGISTRY_CACHE_TTL = 10 * 60 * 1000;
+/** name@version → { value, at }；避免每次刷新都打网络。 */
+const registryCache = new Map();
+
+/** npm registry 的包文档 URL（scoped 包用 @scope%2fname 形式）。 */
+function registryDocumentUrl(name) {
+  const packageName = String(name);
+  if (packageName.startsWith('@')) {
+    return REGISTRY_ORIGIN + '@' + encodeURIComponent(packageName.slice(1)).replace(/%2F/gi, '%2f');
+  }
+  return REGISTRY_ORIGIN + encodeURIComponent(packageName);
+}
+
+/**
+ * 判断 name@version 是否已发布到 npm。
+ * 失败/超时一律视为未发布，保持旧的“本机链接不可分享”行为；
+ * `DSH_MODPACK_REGISTRY_CHECK=off` 可关闭检查（离线环境/测试用）。
+ */
+async function npmHasVersion(name, version) {
+  if (process.env.DSH_MODPACK_REGISTRY_CHECK === 'off') return false;
+  const key = `${name}@${version}`;
+  const now = Date.now();
+  const cached = registryCache.get(key);
+  if (cached && now - cached.at < REGISTRY_CACHE_TTL) return cached.value;
+  let value = false;
+  try {
+    const response = await fetch(registryDocumentUrl(name), {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(2000),
+    });
+    if (response.ok) {
+      const document = await response.json();
+      value = Boolean(document?.versions?.[version]);
+    }
+  } catch {
+    value = false;
+  }
+  registryCache.set(key, { value, at: now });
+  return value;
+}
+
+/** 把 pluginManager 的 bundle 列表 + 行状态整合成前端/工具能用的快照。 */async function profileState(ctx) {
   const manager = getService(ctx, 'pluginManager');
   if (!manager || typeof manager.listBundles !== 'function') {
     throw new Error('pluginManager 服务不可用：本插件需要 DSH 内置插件管理器来读取/安装插件');
@@ -240,8 +282,9 @@ async function profileState(ctx) {
   }
   list.sort((a, b) => a.name.localeCompare(b.name));
 
-  // classifySource 需要 name/version 兜底，这里统一在 Host 侧做一次
-  const withKind = list.map((plugin) => {
+  // classifySource 需要 name/version 兜底，这里统一在 Host 侧做一次；
+  // 本地链接但已发布到 npm 的包升级成 name@version，才可被导出与分享。
+  const withKind = await upgradeLocalPlugins(list.map((plugin) => {
     const classified = classifySource(plugin.source || plugin.spec, plugin.name, plugin.version);
     return {
       ...plugin,
@@ -250,7 +293,7 @@ async function profileState(ctx) {
       installable: classified.installable !== false,
       local: classified.local === true,
     };
-  });
+  }), npmHasVersion);
 
   return {
     ok: true,
@@ -350,9 +393,9 @@ async function runExport(ctx, body, exec) {
   const profile = body?.profile ? String(body.profile) : snapshot.profile;
   const warnings = [];
 
-  const local = selected.filter((plugin) => plugin.local);
+  const local = selected.filter((plugin) => plugin.local && !plugin.installable);
   if (local.length) {
-    warnings.push(`${local.length} 个插件是本机链接/本地路径（${local.map((p) => p.name).join('、')}），没有公开下载地址，已标记为不可安装，导入时会跳过。`);
+    warnings.push(`${local.length} 个插件是本机链接/本地路径且未在 npm 找到对应版本（${local.map((p) => p.name).join('、')}），已标记为不可安装，导入时会跳过。`);
   }
 
   let config = [];

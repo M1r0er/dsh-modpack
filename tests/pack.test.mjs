@@ -7,11 +7,14 @@ import {
   commandFor,
   commandsFor,
   diffPlan,
+  normalizePlugin,
   parseCommandText,
+  registryCandidate,
   renderInstallScript,
   renderReadme,
   sanitizeConfig,
   splitSpec,
+  upgradeLocalPlugins,
   validateManifest,
   zipFileName,
 } from '../lib/pack.mjs';
@@ -35,6 +38,37 @@ test('classifySource：registry / git / tarball / local', () => {
     assert.equal(result.kind, 'local', local);
     assert.equal(result.installable, false, local);
   }
+});
+
+test('本地链接 + npm 坐标：候选 spec 与发布后升级', async () => {
+  assert.equal(registryCandidate('link:D:/DSH Workspace/dsh-workspace-gate', 'dsh-workspace-gate', '0.1.1'), 'dsh-workspace-gate@0.1.1');
+  assert.equal(registryCandidate('file:../x.tgz', '@scope/pkg', '1.2.3'), '@scope/pkg@1.2.3');
+  assert.equal(registryCandidate('link:D:/x', 'dsh-x', 'not-a-version'), null);
+  assert.equal(registryCandidate('dsh-ops@0.3.0', 'dsh-ops', '0.3.0'), null);
+
+  const plugins = [
+    { name: 'pub', version: '1.0.0', source: 'link:D:/pub', local: true, installable: false, spec: 'link:D:/pub' },
+    { name: 'unpub', version: '2.0.0', source: 'link:D:/unpub', local: true, installable: false, spec: 'link:D:/unpub' },
+    { name: 'dsh-ops', version: '0.3.0', source: 'dsh-ops@0.3.0', local: false, installable: true, spec: 'dsh-ops@0.3.0' },
+  ];
+  const upgraded = await upgradeLocalPlugins(plugins, async (name) => name === 'pub');
+  assert.deepEqual(upgraded[0], { ...plugins[0], spec: 'pub@1.0.0', installable: true, published: true });
+  assert.deepEqual(upgraded[1], plugins[1]);
+  assert.deepEqual(upgraded[2], plugins[2]);
+  // probe 抛错时按未发布处理，不阻塞列表。
+  const failed = await upgradeLocalPlugins([plugins[0]], async () => { throw new Error('offline'); });
+  assert.equal(failed[0].installable, false);
+
+  // manifest 归一化保留升级后的 spec；旧条目仍按本地不可分享。
+  const kept = normalizePlugin(upgraded[0]);
+  assert.equal(kept.installable, true);
+  assert.equal(kept.spec, 'pub@1.0.0');
+  assert.equal(kept.published, true);
+  const legacy = normalizePlugin({ name: 'dsh-local', version: '1.0.0', source: 'link:D:/x' });
+  assert.equal(legacy.installable, false);
+  assert.equal(legacy.spec, 'link:D:/x');
+  const plan = diffPlan([{ name: 'pub', spec: 'pub@1.0.0', local: true, installable: true }], [{ name: 'pub', version: '1.0.0' }]);
+  assert.equal(plan.entries[0].status, 'installed-same', '本地已发布条目按 registry spec 参与版本比较');
 });
 
 test('parseCommandText：解析用户给出的示例格式，但不执行', () => {

@@ -37,6 +37,7 @@ window.__ModuleLoader__.load({
       invert: '反选',
       noPlugins: '当前 profile 里没有第三方插件。',
       localTag: '本机链接，不可分享',
+      localPublishedTag: '本机链接 · npm 已发布',
       notShareable: '不可分享',
       disabledTag: '未启用',
       kindGit: 'git',
@@ -132,6 +133,7 @@ window.__ModuleLoader__.load({
       invert: 'Invert',
       noPlugins: 'This profile has no third-party plugins.',
       localTag: 'local link, cannot be shared',
+      localPublishedTag: 'local link · published to npm',
       notShareable: 'cannot be shared',
       disabledTag: 'disabled',
       kindGit: 'git',
@@ -779,8 +781,11 @@ window.__ModuleLoader__.load({
           const tags = [];
           if (version) tags.push(tag('v', version, T.brand));
           if (kindTag) tags.push(tag('k', kindTag));
-          if (plugin.local === true) tags.push(tag('l', t('localTag'), T.warn));
-          else if (plugin.installable === false) tags.push(tag('n', t('notShareable'), T.warn));
+          if (plugin.local === true) {
+            tags.push(plugin.installable === true
+              ? tag('l', t('localPublishedTag'), T.brand)
+              : tag('l', t('localTag'), T.warn));
+          } else if (plugin.installable === false) tags.push(tag('n', t('notShareable'), T.warn));
           if (plugin.enabled === false) tags.push(tag('d', t('disabledTag')));
 
           return h(

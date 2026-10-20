@@ -107,7 +107,9 @@ function workspace() {
 test('Host：导出 → 读包 → 预览，全链路不安装', async () => {
   const dir = workspace();
   const previous = process.env.DSH_MODPACK_DIR;
+  const previousRegistry = process.env.DSH_MODPACK_REGISTRY_CHECK;
   process.env.DSH_MODPACK_DIR = dir;
+  process.env.DSH_MODPACK_REGISTRY_CHECK = 'off';
   try {
     const { ctx, tools } = makeContext({
       bundles: [
@@ -269,6 +271,55 @@ test('Host：包内 disabled 行在导入时被关闭；withConfig 才应用配�
   } finally {
     if (previous === undefined) delete process.env.DSH_MODPACK_DIR;
     else process.env.DSH_MODPACK_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Host：本地链接但已在 npm 发布的插件可被导出，未发布的仍跳过', async () => {
+  const dir = workspace();
+  const previous = process.env.DSH_MODPACK_DIR;
+  const previousRegistry = process.env.DSH_MODPACK_REGISTRY_CHECK;
+  const previousFetch = globalThis.fetch;
+  process.env.DSH_MODPACK_DIR = dir;
+  delete process.env.DSH_MODPACK_REGISTRY_CHECK;
+  // 只把 dsh-modpack-pub 当作已发布；dsh-local-unpub 返回 404。
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('dsh-modpack-pub')) {
+      return { ok: true, json: async () => ({ versions: { '0.2.0': {} } }) };
+    }
+    return { ok: false, json: async () => ({}) };
+  };
+  try {
+    const { ctx, tools } = makeContext({
+      bundles: [
+        bundle('dsh-modpack-pub', '0.2.0', { source: 'link:D:/DSH Workspace/dsh-modpack-pub' }),
+        bundle('dsh-local-unpub', '1.0.0', { source: 'link:D:/DSH Workspace/dsh-local-unpub' }),
+      ],
+      plugins: [liveRow('dsh-modpack-pub'), liveRow('dsh-local-unpub')],
+    });
+    apply(ctx);
+
+    const result = await tools.get('modpack_export').execute({ name: '本地已发布测试', version: '1.0.0' }, {});
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.match(result.commandText, /dsh-modpack-pub@0\.2\.0/);
+    assert.doesNotMatch(result.commandText, /dsh-local-unpub/);
+
+    const manifest = JSON.parse(readZip(readFileSync(result.path)).get('dshpack.json').toString('utf8'));
+    const published = manifest.plugins.find((plugin) => plugin.name === 'dsh-modpack-pub');
+    assert.equal(published.installable, true);
+    assert.equal(published.spec, 'dsh-modpack-pub@0.2.0');
+    assert.equal(published.published, true);
+    assert.equal(manifest.plugins.find((plugin) => plugin.name === 'dsh-local-unpub').installable, false);
+
+    const plan = await tools.get('modpack_inspect').execute({ path: result.path }, {});
+    assert.equal(plan.ok, true, JSON.stringify(plan));
+    assert.equal(plan.statuses.local, 1, '只有未发布的本地包算 local 跳过');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previous === undefined) delete process.env.DSH_MODPACK_DIR;
+    else process.env.DSH_MODPACK_DIR = previous;
+    if (previousRegistry === undefined) delete process.env.DSH_MODPACK_REGISTRY_CHECK;
+    else process.env.DSH_MODPACK_REGISTRY_CHECK = previousRegistry;
     rmSync(dir, { recursive: true, force: true });
   }
 });
