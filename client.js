@@ -364,7 +364,9 @@ window.__ModuleLoader__.load({
     function isInstallable(plugin) {
       if (!plugin || typeof plugin.name !== 'string' || !plugin.name) return false;
       if (plugin.installable === false) return false;
-      if (plugin.local === true) return false;
+      // 本地链接插件只有在 Host 已确认「同版本已发布到 npm」时才可分享；
+      // 旧版 Host 不返回 published 字段，此时维持“本机链接不可分享”的保守行为。
+      if (plugin.local === true && plugin.published !== true) return false;
       return true;
     }
 
@@ -1458,6 +1460,8 @@ window.__ModuleLoader__.load({
     return {
       name: 'modpack',
       inject: ['slots'],
+      // 暴露给测试：勾选可行性的唯一判定，避免测试去猜渲染树。
+      isShareable: isInstallable,
       apply(ctx) {
         const dict = { zh, en };
         const boxes = { locale: { current: undefined } };

@@ -69,8 +69,18 @@ test('client.js：模块可加载、apply 注册 settings.section、Panel 首帧
       plugins: [
         { name: 'dsh-ops', version: '0.3.0', spec: 'dsh-ops@0.3.0', installable: true, local: false, enabled: true, rows: [] },
         { name: 'local-x', version: '1.0.0', spec: 'link:D:/x', installable: false, local: true, enabled: true, rows: [] },
+        {
+          name: 'dsh-workspace-gate',
+          version: '0.1.1',
+          spec: 'dsh-workspace-gate@0.1.1',
+          installable: true,
+          local: true,
+          published: true,
+          enabled: true,
+          rows: [],
+        },
       ],
-      stats: { total: 2, installable: 1, local: 1 },
+      stats: { total: 3, installable: 2, local: 2 },
     }),
   });
 
@@ -93,6 +103,14 @@ test('client.js：模块可加载、apply 注册 settings.section、Panel 首帧
     throw new Error(`unexpected require: ${id}`);
   });
   assert.equal(mod.name, 'modpack');
+  assert.equal(typeof mod.isShareable, 'function');
+
+  // 勾选可行性：本地链接只有在 npm 同版本已发布时才可选（本次修复的核心回归点）
+  assert.equal(mod.isShareable({ name: 'dsh-ops', installable: true, local: false }), true);
+  assert.equal(mod.isShareable({ name: 'dsh-workspace-gate', installable: true, local: true, published: true }), true);
+  assert.equal(mod.isShareable({ name: 'local-x', installable: false, local: true }), false);
+  assert.equal(mod.isShareable({ name: 'not-installable', installable: false }), false);
+  assert.equal(mod.isShareable({ name: '', installable: true }), false);
 
   let registered = null;
   const ctx = {

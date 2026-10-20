@@ -130,8 +130,9 @@ node tests/host.test.mjs   # 用 mock Cordis 服务跑导出→预览→apply �
 
 ## 验证状态
 
+- **2026-10-20 v0.1.2 修复**：Host 已把「本地链接但 npm 同版本已发布」的插件升级为可分享项，但 Client 的勾选判定仍残留 `local === true → 不可选`，导致这类插件显示「本机链接 · npm 已发布」却无法勾选。现已改为以 `installable` / `published` 为准，并补了回归测试（`dsh-workspace-gate`、`dsh-inkvault` 这类插件可直接勾选导出）。
 - **2026-10-19 真机**（DSH 0.2.1-rc.2 / Windows）：重启后设置页已注册（`settings.section`，`id=modpack`，order 45，active）；`modpack_list` 读到 15 个第三方插件；`modpack_export` 生成 5.0 KiB 整合包 / 13 条安装命令（2 个本地链接自动跳过）；`modpack_inspect` 预览结果为 13 已装同版本 + 2 本地链接跳过。
-- **离线**：18 项测试通过（zip 往返/CRC、命令解析、密钥剔除、mock Cordis 全链路、client 模块注册），详见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+- **离线**：20 项测试通过（zip 往返/CRC、命令解析、密钥剔除、本地链接升级、mock Cordis 全链路、client 勾选判定），详见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
 
 ## License
 
